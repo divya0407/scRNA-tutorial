@@ -1,0 +1,2 @@
+"ID","Description","setSize","enrichmentScore","NES","pvalue","p.adjust","qvalue","rank","leading_edge","core_enrichment","CellType","Condition"
+"R-HSA-373080","Class B/2 (Secretin family receptors)",18,0.769223330524718,2.08846911066217,3.03119209941857e-05,0.036889607849924,0.036889607849924,182,"tags=22%, list=3%, signal=22%","GNG10/ADGRE5/DHH/GNB4","EC_AEA","DKD_vs_Healthy"
