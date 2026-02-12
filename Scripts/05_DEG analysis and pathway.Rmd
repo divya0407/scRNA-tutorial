@@ -1,0 +1,394 @@
+---
+title: "DEG Analysis"
+output: html_notebook
+---
+
+
+```{r Load libraries}
+library(zellkonverter)
+library(SingleCellExperiment)
+library(SeuratDisk)
+library(Seurat)
+library(MAST)
+```
+
+```{r transforms the cell typist data from the SCE format into a Seurat object}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("HDF5Array")
+library(HDF5Array)
+# Try the native R reader instead of the default Python one
+sce <- zellkonverter::readH5AD("C:/Users/loneb/OneDrive/Documents/GSE279086/GSE279086_celltypist.h5ad", reader = "R")
+
+
+seurat_obj <- as.Seurat(
+  sce,
+  counts = "counts",
+  data = "logcounts"
+)
+
+saveRDS(seurat_obj, "C:/Users/loneb/OneDrive/Documents/GSE279086_with_celltypist.rds")
+
+```
+
+```{r}
+
+```
+
+```{r cleaning and standardising the cell type labels}
+DefaultAssay(seurat_obj) <- "originalexp"
+celltypes <- sort(unique(seurat_obj$majority_voting))
+celltypes
+
+celltypes <- gsub("-", "_", celltypes)
+celltypes
+```
+```
+```{r Differential Expression (DE) Analysis specifically comparing Diabetic Kidney Disease (DKD) samples against Healthy samples, repeated for every single cell type in your dataset}
+
+run_mast_per_celltype_DKD_vs_Healthy <- function(
+  seu,
+  celltype_col = "majority_voting",     # apna annotation column
+  condition_col = "Condition",   
+  outdir = "C:/Users/loneb/OneDrive/Documents/GSE279086/DEG_MAST_DKD_vs_Healthy",
+  min_cells_per_group = 20
+) {
+
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+  meta <- seu@meta.data
+  celltypes <- sort(unique(meta[[celltype_col]]))
+
+  for (ct in celltypes) {
+
+    cat("\n▶ Processing cell type:", ct, "\n")
+
+    cells_ct <- rownames(meta)[meta[[celltype_col]] == ct]
+    cond_tab <- table(meta[cells_ct, condition_col])
+
+    # ---- check both groups exist
+    if (!all(c("DKD", "Healthy") %in% names(cond_tab))) {
+      cat("  ❌ DKD Or Healthy missing → skipping\n")
+      next
+    }
+
+    # ---- minimum cells check
+    if (any(cond_tab[c("DKD", "Healthy")] < min_cells_per_group)) {
+      cat("  ❌ Not enough cells → skipping\n")
+      next
+    }
+
+    # ---- subset object
+    seu_ct <- subset(seu, cells = cells_ct)
+    DefaultAssay(seu_ct) <- "originalexp"
+    seu_ct <- NormalizeData(seu_ct, verbose = FALSE)
+
+    Idents(seu_ct) <- condition_col
+
+    # ---- run MAST
+    deg <- FindMarkers(
+      seu_ct,
+      ident.1 = "DKD",
+      ident.2 = "Healthy",
+      test.use = "MAST",
+      logfc.threshold = 0,
+      min.pct = 0.1,
+      latent.vars = c("nCount_RNA", "percent.mt")
+    )
+
+    deg$gene <- rownames(deg)
+
+    # 🔥 CRITICAL FIX (THIS LINE SOLVES YOUR ERROR)
+    ct_clean <- gsub("[^a-zA-Z0-9]", "_", ct)
+
+    out_file <- file.path(
+      outdir,
+      paste0("DEG_", ct_clean, "_DKD_vs_Healthy.csv")
+    )
+
+    write.csv(deg, out_file, row.names = FALSE)
+
+    cat("  ✔ Saved:", out_file, "\n")
+  }
+}
+
+```
+
+
+```{r It checks if each cell type has enough cells (at least 20) in both the DKD group and the Healthy group}
+run_mast_per_celltype_DKD_vs_Healthy(
+  seu = seurat_obj,
+  celltype_col = "majority_voting",   
+  condition_col = "Condition"
+)
+
+```
+```
+```{r}
+```{r summarizing the findings into 1 csv file}
+library(clusterProfiler)
+library(ReactomePA)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(dplyr)
+library(ggplot2)
+library(enrichplot)
+
+deg_path <- "C:/Users/loneb/OneDrive/Documents/GSE279086/DEG_MAST_DKD_vs_Healthy"
+
+deg_files <- list.files(
+  deg_path,
+  pattern = "^DEG_.*\\.csv$",
+  full.names = TRUE
+)
+
+deg_files
+
+# --------------------------------------------------
+# Fix gene column name ONLY for DEG files
+# --------------------------------------------------
+for (file in deg_files) {
+  df <- read.csv(file, header = TRUE, stringsAsFactors = FALSE)
+  
+  if (colnames(df)[1] %in% c("", "X")) {
+    colnames(df)[1] <- "genes"
+  }
+  
+  write.csv(df, file, row.names = FALSE)
+}
+
+deg_summary <- data.frame(
+  CellType = character(),
+  Upregulated = integer(),
+  Downregulated = integer(),
+  Total_DEGs = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (file in deg_files) {
+  deg_data <- read.csv(file)
+  
+  if (!all(c("avg_log2FC", "p_val_adj") %in% colnames(deg_data))) {
+    warning(paste("Skipping (missing columns):", basename(file)))
+    next
+  }
+  
+  up   <- sum(deg_data$avg_log2FC > 0 & deg_data$p_val_adj < 0.05)
+  down <- sum(deg_data$avg_log2FC < 0 & deg_data$p_val_adj < 0.05)
+  
+  celltype <- gsub("^DEG_(.*?)_DKD_vs_Healthy\\.csv$", "\\1", basename(file))
+  
+  deg_summary <- rbind(
+    deg_summary,
+    data.frame(
+      CellType = celltype,
+      Upregulated = up,
+      Downregulated = down,
+      Total_DEGs = up + down
+    )
+  )
+}
+
+deg_summary <- deg_summary %>% arrange(desc(Total_DEGs))
+
+print(deg_summary)
+
+write.csv(
+  deg_summary,
+  "C:/Users/loneb/OneDrive/Documents/GSE279086/DEG_MAST_DKD_vs_Healthy/DEGsummary_table.csv",
+  row.names = FALSE
+)
+```
+```
+
+```{r}
+# pathways
+
+```{r}
+all_pathways_df <- data.frame()
+
+for (file_path in deg_files) {
+
+  file_name <- basename(file_path)
+  message("\n==============================")
+  message("▶ Processing file: ", file_name)
+
+  ## ---- Cell type extraction ----
+  celltype <- sub("^DEG_(.*?)_DKD_vs_Healthy\\.csv$", "\\1", file_name)
+
+  if (celltype == file_name) {
+    warning("⚠ Celltype extraction FAILED for file: ", file_name)
+    next
+  }
+
+  celltype_clean <- gsub("[^a-zA-Z0-9]", "_", celltype)
+  condition <- "DKD_vs_Healthy"
+
+  message("  ✔ Cell type identified: ", celltype)
+
+  ## ---- Read DEG file ----
+  res <- tryCatch(
+    read.csv(file_path, stringsAsFactors = FALSE),
+    error = function(e) {
+      message(" Failed to read file: ", e$message)
+      return(NULL)
+    }
+  )
+  if (is.null(res)) next
+
+  message("  ✔ DEG rows read: ", nrow(res))
+
+  ## ---- Required columns ----
+  if (!all(c("gene", "avg_log2FC") %in% colnames(res))) {
+    warning("  ⚠ Missing required columns in: ", file_name)
+    next
+  }
+
+  ## ---- SYMBOL → ENTREZ ----
+  ncbi_map <- suppressMessages(
+    clusterProfiler::bitr(
+      res$gene,
+      fromType = "SYMBOL",
+      toType = "ENTREZID",
+      OrgDb = org.Hs.eg.db
+    )
+  )
+
+  message("  ✔ Genes mapped to ENTREZ: ", nrow(ncbi_map))
+
+  res_mapped <- res %>%
+    left_join(ncbi_map, by = c("gene" = "SYMBOL")) %>%
+    filter(!is.na(ENTREZID)) %>%
+    distinct(ENTREZID, .keep_all = TRUE)
+
+  message(" Genes after filtering: ", nrow(res_mapped))
+
+  ## ---- Ranked gene list ----
+  gene_list <- res_mapped$avg_log2FC
+  names(gene_list) <- res_mapped$ENTREZID
+  gene_list <- sort(gene_list, decreasing = TRUE)
+
+  message("  ✔ Ranked gene list length: ", length(gene_list))
+
+  if (length(gene_list) < 20) {
+    message("  ⏭ Skipping GSEA: too few genes")
+    next
+  }
+
+  ## ---- Run GSEA ----
+  message(" Running Reactome GSEA...")
+
+  gsea_res <- tryCatch(
+    gsePathway(
+      geneList = gene_list,
+      organism = "human",
+      eps = 0,
+      verbose = FALSE
+    ),
+    error = function(e) {
+      message("  GSEA FAILED: ", e$message)
+      return(NULL)
+    }
+  )
+
+  if (is.null(gsea_res) || nrow(gsea_res@result) == 0) {
+    message("  ⏭ No significant pathways")
+    next
+  }
+
+  ## ---- Make readable ----
+  gsea_res <- setReadable(
+    gsea_res,
+    OrgDb = org.Hs.eg.db,
+    keyType = "ENTREZID"
+  )
+
+  pathways <- gsea_res@result %>%
+    filter(
+      !is.na(Description),
+      !is.na(NES),
+      !is.na(p.adjust),
+      !is.na(setSize)
+    )
+
+  message(" Valid pathways: ", nrow(pathways))
+
+  if (nrow(pathways) == 0) next
+
+  ## ---- Add metadata ----
+  pathways$CellType  <- celltype
+  pathways$Condition <- condition
+
+  all_pathways_df <- rbind(all_pathways_df, pathways)
+
+  ## ---- Save per-cell CSV ----
+  out_csv <- file.path(
+    deg_path,
+    paste0(celltype_clean, "_Reactome_GSEA_", condition, ".csv")
+  )
+  write.csv(pathways, out_csv, row.names = FALSE)
+
+  message("  ✔ GSEA CSV written for ", celltype)
+}
+```
+
+
+
+```{r}
+gsea_png_files <- c()
+
+for (ct in unique(all_pathways_df$CellType)) {
+
+  df_ct <- all_pathways_df %>%
+    filter(CellType == ct)
+
+  if (nrow(df_ct) == 0) {
+    message(" No pathways to plot")
+    next
+  }
+
+  ## ---- Select top pathways ----
+  top_pathways <- df_ct %>%
+    arrange(desc(abs(NES))) %>%
+    slice_head(n = 10)
+
+ if (nrow(top_pathways) == 0) next
+
+  ## ---- Order pathways by NES ----
+  top_pathways$Description <- factor(
+    top_pathways$Description,
+    levels = top_pathways$Description[order(top_pathways$NES)]
+  )
+
+  ## ---- Plot ----
+  p <- ggplot(
+    top_pathways,
+    aes(x = NES, y = Description, color = p.adjust, size = setSize)
+  ) +
+    geom_point() +
+    theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7, face = "bold"),
+    axis.text.x = element_text(size = 7, face = "bold")
+  )
+  ## ---- Save PNG ----
+  ct_clean <- gsub("[^a-zA-Z0-9]", "_", ct)
+
+  png_file <- file.path(
+    deg_path,
+    paste0(ct_clean, ".png")
+  )
+
+  png(png_file, width = 9, height = 6, units = "in", res = 300)
+  print(p)
+  dev.off()
+
+  gsea_png_files <- c(gsea_png_files, png_file)
+}
+
+```
+```
+
+```
+
