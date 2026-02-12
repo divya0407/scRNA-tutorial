@@ -6,7 +6,7 @@ This repository contains a complete end-to-end bioinformatics pipeline for the p
 
 **Platform:** 10X Genomics
 
-**Conditions:** AKI (Acute Kidney Injury), DKD (Diabetic Kidney Disease), HCKD (Hypertensive Chronic Kidney Disease), and Healthy Controls.
+**Conditions:** DKD (Diabetic Kidney Disease) and Healthy Controls.
 
 **Input:** Raw 10X count matrices.
 
